@@ -180,6 +180,9 @@ pub struct FnArgs {
     /// Syntax to use to format the disassembly.
     #[arg(long, value_enum, env = "ELF_INFO_ASM_SYNTAX", default_value_t)]
     pub syntax: Syntax,
+
+    #[arg(long)]
+    pub arch: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]

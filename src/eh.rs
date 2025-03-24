@@ -25,6 +25,8 @@ use crate::print::{PairTable, SizePrint};
 use crate::sections::find_section;
 use crate::sym::addr_to_sym;
 
+pub static mut IS_ARM: bool = false;
+
 pub fn eh(elf: &Elf, bytes: &[u8], mut opts: EhArgs) -> Result<()> {
     let sh = if let Some(ref name) = opts.section {
         find_section(elf, name)
@@ -451,6 +453,11 @@ enum Value {
     Unsigned(u64),
 }
 
-fn register_name(r: Register) -> &'static str {
-    X86_64::register_name(r).unwrap_or("???") // TODO: handle other archs
+fn register_name(r: Register) -> String {
+    let is_arm = unsafe { IS_ARM };
+    if is_arm {
+        format!("x{}", r.0)
+    } else {
+        X86_64::register_name(r).unwrap_or("???").to_string()
+    }
 }

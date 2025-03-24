@@ -17,13 +17,16 @@ use gimli::{BaseAddresses, CallFrameInstruction, EhFrame, EndianSlice,
             UnwindSection};
 use goblin::container::Container;
 use goblin::elf::sym::STT_FUNC;
-use iced_x86::{Decoder, DecoderOptions, Formatter, FormatterOutput,
+use iced_x86::{Decoder, DecoderError, DecoderOptions, Formatter, FormatterOutput,
                FormatterTextKind, GasFormatter, Instruction, IntelFormatter,
                SymbolResolver, SymbolResult};
 use rustc_demangle::demangle;
+use bad64::operand::Operand;
+use bad64::op;
 
 use crate::args::{FnArgs, Syntax};
 use crate::eh::EhInstrContext;
+use crate::eh::IS_ARM;
 use crate::elf::{find_symbol, find_symbol_by_addr, symbol_file_offset};
 use crate::print::SizePrint;
 use crate::sections::find_section;
@@ -63,6 +66,7 @@ pub fn do_fn(elf: &Elf, bytes: &[u8], args: &FnArgs) -> Result<()> {
     let opts = DisassOptions {
         cfi: args.cfi,
         syntax: args.syntax,
+        arch: args.arch.clone(),
     };
     disassemble(elf, bytes, sym.st_value, content, opts);
 
@@ -120,6 +124,7 @@ impl FormatterOutput for ColorOutput {
 struct DisassOptions {
     syntax: Syntax,
     cfi: bool,
+    arch: Option<String>,
 }
 
 fn disassemble(elf: &Elf, bytes: &[u8], ip: u64, content: &[u8], opts: DisassOptions) {
@@ -161,8 +166,91 @@ fn disassemble(elf: &Elf, bytes: &[u8], ip: u64, content: &[u8], opts: DisassOpt
     formatter.options_mut().set_gas_space_after_memory_operand_comma(true);
 
     let mut eh = opts.cfi.then(|| EhFnCtx::new(elf, bytes, ip)).flatten();
+    let mut arm_ip = ip;
+    let is_arm =
+        if let Some(ref arch) = opts.arch {
+            arch == "aarch64"
+        } else {
+            elf.header.e_machine == goblin::elf::header::EM_AARCH64
+        };
+
+    if is_arm {
+        decoder.max_data_ptr = decoder.data_ptr_end - 1;
+        unsafe {
+            IS_ARM = true;
+        }
+    }
 
     while decoder.can_decode() {
+        if is_arm {
+            let instr = decoder.read_u32() as u32;
+            if decoder.last_error() != DecoderError::None {
+                if decoder.last_error() == DecoderError::NoMoreBytes {
+                    break
+                }
+                arm_ip += 4;
+                continue
+            }
+            let decoded = bad64::decode(instr, arm_ip);
+            if let Ok(decoded) = decoded {
+                if let Some(ref mut eh) = eh {
+                    eh.at_ip(arm_ip);
+                }
+                print!("{} \x1b[97m│\x1b[0m  ", sp.hex(arm_ip));
+
+                let start_index = (arm_ip - ip) as usize;
+                let bytes = &content[start_index..(start_index + 4)];
+
+                for &byte in bytes {
+                    print!("{byte:02x} ");
+                }
+                print!(
+                    "{:w$} \x1b[97m│\x1b[0m  ", "",
+                    w = 0
+                );
+
+                print!(" \x1b[33m{}\x1b[0m", decoded.op());
+                let mut i = 0;
+                for operand in decoded.operands().iter() {
+                    if i > 0 {
+                        print!(",");
+                    }
+                    let color = match operand {
+                        Operand::Imm64 { .. } | Operand::Imm32 { .. } => 36,
+                        Operand::FImm32(_) => 36,
+                        Operand::ShiftReg { .. } => 32,
+                        Operand::QualReg { .. } => 32,
+                        Operand::Reg { .. } => 32,
+                        Operand::MultiReg { .. } => 32,
+                        Operand::SysReg(_) => 32,
+                        Operand::MemReg(_) => {
+                            if decoded.op() == op::Op::BL || decoded.op() == op::Op::B {
+                                94
+                            } else {
+                                34
+                            }
+                        }
+                        Operand::MemPreIdx { .. } => 34,
+                        Operand::MemPostIdxImm { .. } => 36,
+                        Operand::MemExt { .. } => 34,
+                        Operand::MemPostIdxReg(_) => 34,
+                        Operand::MemOffset { .. } => 34,
+                        Operand::Label(_) => 0,
+                        Operand::Cond(_) => 0,
+                        Operand::Name(_) => 0,
+                        Operand::StrImm { .. } => 36,
+                        _ => 0,
+                    };
+                    print!(" \x1b[{}m{}\x1b[0m", color, operand);
+                    i += 1;
+                }
+
+                println!("\x1b[0m");
+            }
+            arm_ip += 4;
+            continue
+        }
+
         let instr = decoder.decode();
         let start_index = (instr.ip() - ip) as usize;
         let bytes = &content[start_index..(start_index + instr.len())];
